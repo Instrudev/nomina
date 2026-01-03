@@ -4,11 +4,15 @@ include 'conn.php';
 include 'timezone.php';
 date_default_timezone_set('America/Bogota');
 session_start();
+$payrollSettings = cargarConfiguracionNomina($conn);
+$tarifasNomina = calcularTarifasNomina($payrollSettings);
+if (!defined('SALARIO_MINIMO')) {
+    define('SALARIO_MINIMO', $payrollSettings['salario_minimo_mensual']);
+}
+if (!defined('AUXILIO_TRANSPORTE_DIA')) {
+    define('AUXILIO_TRANSPORTE_DIA', $payrollSettings['auxilio_transporte_diario']);
+}
 if (isset($_POST['employee'])) {
-
-    // Definiciones para 2025
-    define('SALARIO_MINIMO', 1423500); // Salario mínimo legal mensual 2025
-    define('AUXILIO_TRANSPORTE_DIA', 6667); // Auxilio prorrateado (200000/30)
 
     setlocale(LC_TIME, 'es_ES.UTF-8');
     $employee = $_POST['employee'];
@@ -216,6 +220,90 @@ function manejarSalida($conn, $employee_id, $date_now, $time_now) {
     }
 }
 
+function asegurarTablaConfiguracionNomina($conn) {
+    $sql = "CREATE TABLE IF NOT EXISTS payroll_settings (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        salario_minimo_mensual DECIMAL(12,2) NOT NULL,
+        auxilio_transporte_mensual DECIMAL(12,2) NOT NULL,
+        horas_laborales_mensuales DECIMAL(6,2) NOT NULL DEFAULT 240,
+        porcentaje_nocturno DECIMAL(5,2) NOT NULL,
+        porcentaje_extra_diurno DECIMAL(5,2) NOT NULL,
+        porcentaje_extra_nocturno DECIMAL(5,2) NOT NULL,
+        porcentaje_festivo DECIMAL(5,2) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )";
+    $conn->query($sql);
+
+    $check = $conn->query("SELECT id FROM payroll_settings LIMIT 1");
+    if ($check && $check->num_rows === 0) {
+        $salario_minimo = 1423500.00;
+        $auxilio_transporte = 200000.00;
+        $horas_mensuales = 230.00;
+        $porcentaje_nocturno = 35.00;
+        $porcentaje_extra_diurno = 25.00;
+        $porcentaje_extra_nocturno = 75.00;
+        $porcentaje_festivo = 75.00;
+        $conn->query("INSERT INTO payroll_settings (
+                salario_minimo_mensual,
+                auxilio_transporte_mensual,
+                horas_laborales_mensuales,
+                porcentaje_nocturno,
+                porcentaje_extra_diurno,
+                porcentaje_extra_nocturno,
+                porcentaje_festivo
+            ) VALUES (
+                $salario_minimo,
+                $auxilio_transporte,
+                $horas_mensuales,
+                $porcentaje_nocturno,
+                $porcentaje_extra_diurno,
+                $porcentaje_extra_nocturno,
+                $porcentaje_festivo
+            )");
+    }
+}
+
+function cargarConfiguracionNomina($conn) {
+    asegurarTablaConfiguracionNomina($conn);
+    $sql = "SELECT * FROM payroll_settings ORDER BY id DESC LIMIT 1";
+    $query = $conn->query($sql);
+    $settings = $query ? $query->fetch_assoc() : null;
+    if (!$settings) {
+        $settings = [
+            'salario_minimo_mensual' => 1423500.00,
+            'auxilio_transporte_mensual' => 200000.00,
+            'horas_laborales_mensuales' => 230.00,
+            'porcentaje_nocturno' => 35.00,
+            'porcentaje_extra_diurno' => 25.00,
+            'porcentaje_extra_nocturno' => 75.00,
+            'porcentaje_festivo' => 75.00
+        ];
+    }
+
+    $settings['auxilio_transporte_diario'] = round($settings['auxilio_transporte_mensual'] / 30, 2);
+    return $settings;
+}
+
+function calcularTarifasNomina($settings) {
+    $hora_base = $settings['salario_minimo_mensual'] / $settings['horas_laborales_mensuales'];
+    $hora_base = round($hora_base, 2);
+    $porcentaje_nocturno = $settings['porcentaje_nocturno'] / 100;
+    $porcentaje_extra_diurno = $settings['porcentaje_extra_diurno'] / 100;
+    $porcentaje_extra_nocturno = $settings['porcentaje_extra_nocturno'] / 100;
+    $porcentaje_festivo = $settings['porcentaje_festivo'] / 100;
+
+    return [
+        'hora_ordinaria_diurna' => $hora_base,
+        'hora_ordinaria_nocturna' => round($hora_base * (1 + $porcentaje_nocturno), 2),
+        'hora_extra_diurna' => round($hora_base * (1 + $porcentaje_extra_diurno), 2),
+        'hora_extra_nocturna' => round($hora_base * (1 + $porcentaje_extra_nocturno), 2),
+        'hora_festivo_diurna' => round($hora_base * (1 + $porcentaje_festivo), 2),
+        'hora_festivo_nocturna' => round($hora_base * (1 + $porcentaje_festivo + $porcentaje_nocturno), 2),
+        'hora_extra_festivo_diurna' => round($hora_base * (1 + $porcentaje_festivo + $porcentaje_extra_diurno), 2),
+        'hora_extra_festivo_nocturna' => round($hora_base * (1 + $porcentaje_festivo + $porcentaje_extra_nocturno), 2)
+    ];
+}
+
 /**
  * Calcula el salario y sus componentes basado en el detalle de horas trabajadas.
  *
@@ -240,6 +328,7 @@ function manejarSalida($conn, $employee_id, $date_now, $time_now) {
  * @return array Componentes salariales y total
  */
 function calcularSalario($auxilio_transporte, $time_in, $time_out, $fecha) {
+    global $tarifasNomina;
     // Lista de fechas festivas
     $festivos = [
         "2025-01-30", "2025-01-05", "2025-01-06", "2025-01-12", "2025-01-19", "2025-01-26", 
@@ -267,33 +356,33 @@ function calcularSalario($auxilio_transporte, $time_in, $time_out, $fecha) {
     // Asignar tarifas según si es día festivo o no
     if (!$esFestivo) {
         // Día normal:
-        $hora_ordinaria_diurna = 6189;
-        $hora_ordinaria_nocturna = 8355;
-        $hora_extra_diurna = 7736;
-        $hora_extra_nocturna = 10831;
+        $hora_ordinaria_diurna = $tarifasNomina['hora_ordinaria_diurna'];
+        $hora_ordinaria_nocturna = $tarifasNomina['hora_ordinaria_nocturna'];
+        $hora_extra_diurna = $tarifasNomina['hora_extra_diurna'];
+        $hora_extra_nocturna = $tarifasNomina['hora_extra_nocturna'];
     } else {
         // Día festivo o dominical:
-        $hora_ordinaria_diurna = 10831;
-        $hora_ordinaria_nocturna = 12997;
-        $hora_extra_diurna = 12378;
-        $hora_extra_nocturna = 15472;
+        $hora_ordinaria_diurna = $tarifasNomina['hora_festivo_diurna'];
+        $hora_ordinaria_nocturna = $tarifasNomina['hora_festivo_nocturna'];
+        $hora_extra_diurna = $tarifasNomina['hora_extra_festivo_diurna'];
+        $hora_extra_nocturna = $tarifasNomina['hora_extra_festivo_nocturna'];
     }
     
     // Calcular pagos por cada componente
      $pago_normal_diurno = $normal_diurnas * $hora_ordinaria_diurna;
  $pago_normal_nocturno = $normal_nocturnas * $hora_ordinaria_nocturna;
-     $pago_extra_diurno = $extra_diurnas * $hora_extra_diurna;
-    echo $pago_extra_nocturno = $extra_nocturnas * $hora_extra_nocturna;
+    $pago_extra_diurno = $extra_diurnas * $hora_extra_diurna;
+    $pago_extra_nocturno = $extra_nocturnas * $hora_extra_nocturna;
 
     $total = $pago_normal_diurno + $pago_normal_nocturno + $pago_extra_diurno + $pago_extra_nocturno + $auxilio_transporte;
     
     // Calcular recargo festivo (opcional), comparando con la tarifa base de día normal
-    $base_normal_total = ($normal_diurnas + $normal_nocturnas) * 6189; 
+    $base_normal_total = ($normal_diurnas + $normal_nocturnas) * $tarifasNomina['hora_ordinaria_diurna']; 
     $recargo_festivo = ($esFestivo) ? (($pago_normal_diurno + $pago_normal_nocturno) - $base_normal_total) : 0;
 
     return [
         'salario_base'     => round($pago_normal_diurno + $pago_normal_nocturno, 2),
-        'recargo_noc'      => round($pago_normal_nocturno, 2) - round($normal_nocturnas * 6189, 2),
+        'recargo_noc'      => round($pago_normal_nocturno, 2) - round($normal_nocturnas * $tarifasNomina['hora_ordinaria_diurna'], 2),
         'hora_ext_diu'     => ($esFestivo) ? round($pago_extra_diurno, 2) : round($pago_extra_diurno, 2),
         'hora_ext_noc'     => ($esFestivo) ? round($pago_extra_nocturno, 2) : round($pago_extra_nocturno, 2),
         //'hora_ext_dom_diu' => ($esFestivo) ? round($pago_extra_diurno, 2) : 0,

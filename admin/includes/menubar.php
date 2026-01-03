@@ -47,6 +47,7 @@
       <?php if($_SESSION['superadmin']  == "superadmin"): ?>
         <li><a href="./cargar_cuenta.php" ><i class="fa fa-file-o"></i> <span>CARGAR CUENTA</span></a></li>
       <li><a href="./ventana_emergente.php" ><i class="fa fa-clock-o"></i> <span>Mora</span></a></li>
+      <li><a href="./payroll_settings.php" ><i class="fa fa-cogs"></i> <span>Configuración Nómina</span></a></li>
       <?php  endif; ?>
     </ul>
   </section>
